@@ -15,17 +15,11 @@ import (
 )
 
 type idemixSigningIdentityWrapper struct {
-	*idemixmsp.IdemixSigningIdentity
+	idemixmsp.SigningIdentity
 }
 
 func (i *idemixSigningIdentityWrapper) GetPublicVersion() Identity {
-	idemixID, ok := i.IdemixSigningIdentity.GetPublicVersion().(*idemixmsp.Idemixidentity)
-	if !ok {
-		// Return nil identity if type assertion fails - caller should handle nil check
-		mspLogger.Error("identity is not idemix: type assertion failed")
-		return nil
-	}
-	return &idemixIdentityWrapper{Idemixidentity: idemixID}
+	return &idemixIdentityWrapper{Identity: i.SigningIdentity.GetPublicVersion()}
 }
 
 func (i *idemixSigningIdentityWrapper) GetIdentifier() *IdentityIdentifier {
@@ -49,11 +43,11 @@ func (*idemixSigningIdentityWrapper) GetCertificatePEM() ([]byte, error) {
 }
 
 type idemixIdentityWrapper struct {
-	*idemixmsp.Idemixidentity
+	idemixmsp.Identity
 }
 
 func (i *idemixIdentityWrapper) GetIdentifier() *IdentityIdentifier {
-	id := i.Idemixidentity.GetIdentifier()
+	id := i.Identity.GetIdentifier()
 
 	return &IdentityIdentifier{
 		Mspid: id.Mspid,
@@ -75,7 +69,7 @@ func (*idemixIdentityWrapper) GetCertificatePEM() ([]byte, error) {
 }
 
 func (i *idemixIdentityWrapper) GetOrganizationalUnits() []*OUIdentifier {
-	ous := i.Idemixidentity.GetOrganizationalUnits()
+	ous := i.Identity.GetOrganizationalUnits()
 	wous := []*OUIdentifier{}
 	for _, ou := range ous {
 		wous = append(wous, &OUIdentifier{
@@ -88,20 +82,19 @@ func (i *idemixIdentityWrapper) GetOrganizationalUnits() []*OUIdentifier {
 }
 
 type idemixMSPWrapper struct {
-	*idemixmsp.Idemixmsp
+	*idemixmsp.MSP
 }
 
 func (i *idemixMSPWrapper) deserializeIdentityInternal(serializedIdentity []byte) (Identity, error) {
-	id, err := i.Idemixmsp.DeserializeIdentityInternal(serializedIdentity)
+	mspID, err := i.GetIdentifier()
 	if err != nil {
 		return nil, err
 	}
-	idemixID, ok := id.(*idemixmsp.Idemixidentity)
-	if !ok {
-		return nil, errors.New("identity is not idemix: type assertion failed")
-	}
 
-	return &idemixIdentityWrapper{idemixID}, nil
+	return i.DeserializeIdentity(&msppb.Identity{
+		MspId:   mspID,
+		Creator: &msppb.Identity_Certificate{Certificate: serializedIdentity},
+	})
 }
 
 func (i *idemixMSPWrapper) DeserializeIdentity(identity *msppb.Identity) (Identity, error) { //nolint:ireturn
@@ -110,16 +103,12 @@ func (i *idemixMSPWrapper) DeserializeIdentity(identity *msppb.Identity) (Identi
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to marshal serialized identity")
 	}
-	id, err := i.Idemixmsp.DeserializeIdentity(siBytes)
+	id, err := i.MSP.DeserializeIdentity(siBytes)
 	if err != nil {
 		return nil, err
 	}
-	idemixID, ok := id.(*idemixmsp.Idemixidentity)
-	if !ok {
-		return nil, errors.New("identity is not idemix: type assertion failed")
-	}
 
-	return &idemixIdentityWrapper{idemixID}, nil
+	return &idemixIdentityWrapper{id}, nil
 }
 
 // GetKnownDeserializedIdentity returns a known identity matching the given IdentityIdentifier.
@@ -130,15 +119,15 @@ func (*idemixMSPWrapper) GetKnownDeserializedIdentity(IdentityIdentifier) Identi
 }
 
 func (i *idemixMSPWrapper) IsWellFormed(identity *msppb.Identity) error {
-	return i.Idemixmsp.IsWellFormed(&msp.SerializedIdentity{Mspid: identity.MspId, IdBytes: identity.GetCertificate()})
+	return i.MSP.IsWellFormed(&msp.SerializedIdentity{Mspid: identity.MspId, IdBytes: identity.GetCertificate()})
 }
 
 func (i *idemixMSPWrapper) GetVersion() MSPVersion {
-	return MSPVersion(i.Idemixmsp.GetVersion())
+	return MSPVersion(i.MSP.GetVersion())
 }
 
 func (i *idemixMSPWrapper) GetType() ProviderType {
-	return ProviderType(i.Idemixmsp.GetType())
+	return ProviderType(i.MSP.GetType())
 }
 
 func (*idemixMSPWrapper) GetCertificatePEM() ([]byte, error) {
@@ -146,22 +135,28 @@ func (*idemixMSPWrapper) GetCertificatePEM() ([]byte, error) {
 }
 
 func (i *idemixMSPWrapper) GetDefaultSigningIdentity() (SigningIdentity, error) {
-	id, err := i.Idemixmsp.GetDefaultSigningIdentity()
+	id, err := i.MSP.GetDefaultSigningIdentity()
 	if err != nil {
 		return nil, err
 	}
-	idemixID, ok := id.(*idemixmsp.IdemixSigningIdentity)
-	if !ok {
-		return nil, errors.New("identity is not idemix: type assertion failed")
-	}
 
-	return &idemixSigningIdentityWrapper{idemixID}, nil
+	return &idemixSigningIdentityWrapper{id}, nil
 }
 
 func (i *idemixMSPWrapper) Validate(id Identity) error {
-	return i.Idemixmsp.Validate(id.(*idemixIdentityWrapper).Idemixidentity)
+	wrapper, ok := id.(*idemixIdentityWrapper)
+	if !ok {
+		return errors.New("identity is not idemix: type assertion failed")
+	}
+
+	return i.MSP.Validate(wrapper.Identity)
 }
 
 func (i *idemixMSPWrapper) SatisfiesPrincipal(id Identity, principal *msp.MSPPrincipal) error {
-	return i.Idemixmsp.SatisfiesPrincipal(id.(*idemixIdentityWrapper).Idemixidentity, principal)
+	wrapper, ok := id.(*idemixIdentityWrapper)
+	if !ok {
+		return errors.New("identity is not idemix: type assertion failed")
+	}
+
+	return i.MSP.SatisfiesPrincipal(wrapper.Identity, principal)
 }
